@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Cognate Synonym Evaluation</title>
+	<style>
+		body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.4; }
+		h1, h2, h3, h4 { margin-bottom: 0.4em; }
+		form { padding: 16px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 28px; background: #fff; }
+		label { font-weight: 600; }
+		input[type="text"], input[type="number"], select { padding: 6px 8px; margin-top: 4px; margin-bottom: 12px; width: 300px; max-width: 100%; box-sizing: border-box; }
+		input[type="file"] { margin-top: 4px; margin-bottom: 12px; }
+		input:disabled { background: #f2f2f2; color: #666; cursor: not-allowed; }
+		button { padding: 8px 14px; cursor: pointer; }
+		.help-text { font-size: 0.95em; color: #444; margin-top: -6px; margin-bottom: 12px; }
+		.error { color: #b00020; font-weight: 700; margin: 12px 0; }
+		.warning { color: #7a5200; background: #fff4d6; border: 1px solid #e0c36d; padding: 10px 12px; border-radius: 6px; margin: 12px 0; }
+		table { border-collapse: collapse; width: 100%; margin-top: 16px; margin-bottom: 24px; table-layout: fixed; }
+		th, td { border: 1px solid #ccc; padding: 10px; vertical-align: top; text-align: left; }
+		th { background: #f5f5f5; }
+		.ety-box { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+		.small-note { font-size: 0.92em; color: #555; }
+		.result-header { margin-top: 30px; padding-top: 12px; border-top: 2px solid #ddd; }
+		.hidden-item, .hidden-group, .group-none { display: none; }
+		.group-none.visible { display: inline; color: #555; font-style: italic; }
+		.direct-cognate-alert { background: #e8f5e9; border: 1px solid #2e7d32; color: #2e7d32; padding: 10px; border-radius: 4px; margin-bottom: 10px; font-weight: bold; }
+		.download-panel { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; margin: 18px 0 8px 0; background: #fafafa; }
+		.download-button { display: inline-block; padding: 8px 14px; border: 1px solid #777; border-radius: 6px; text-decoration: none; color: #111; background: #fff; font-weight: 700; }
+		.download-button:hover { background: #f0f0f0; }
+		.frequency-summary { margin: 6px 0 12px 0; color: #333; }
+
+		<!--this makes sure the column width stays consistent across rows -->
+		.col-target { width: 90px; }
+		.col-target-ety { width: 220px; }
+		.col-translation { width: 170px; }
+		.col-translation-ety { width: 38%; }
+		.col-synonyms { width: calc(62% - 480px); }
+
+		.result-controls-grid { display: grid; grid-template-columns: 360px 1fr; gap: 24px; align-items: start; margin-top: 10px; margin-bottom: 18px; }
+		.sliders-panel { border: 1px solid #ccc; border-radius: 8px; padding: 14px 16px; background: #fff; }
+		.threshold-wrap { margin: 10px 0 18px 0; }
+		.threshold-wrap input[type="range"] { width: 320px; max-width: 100%; vertical-align: middle; }
+
+		<!--this is for the histograms (semantic and orthographic similarity) -->
+		.histogram-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+		.histogram-panel { border: 1px solid #ccc; border-radius: 8px; padding: 14px 16px; background: #fff; }
+		.vertical-histogram-wrap { width: 100%; overflow-x: auto; padding-top: 8px; }
+		.vertical-histogram { height: 260px; min-width: 420px; display: flex; align-items: end; gap: 10px; padding: 12px 8px 28px 8px; border-left: 1px solid #bbb; border-bottom: 1px solid #bbb; box-sizing: border-box; }
+		.vh-bin { flex: 1 1 0; min-width: 30px; display: flex; flex-direction: column; align-items: center; justify-content: end; gap: 6px; }
+		.vh-count { font-size: 0.85em; color: #333; min-height: 1em; }
+		.vh-bar-wrap { width: 100%; height: 180px; display: flex; align-items: end; justify-content: center; }
+		.vh-bar {
+			width: 70%;
+			min-width: 8px;
+			max-width: 42px;
+			background: #4a78b0;
+			border-radius: 4px 4px 0 0;
+			transition: height 0.2s ease;
+		}
+		.vh-label { font-size: 0.78em; text-align: center; line-height: 1.1; word-break: break-word; }
+
+		<!--this gives dynamic updates regarding status of the analysis (for uploaded txt files) -->
+		.loading-overlay {
+			position: fixed;
+			inset: 0;
+			background: rgba(255, 255, 255, 0.82);
+			display: none;
+			align-items: center;
+			justify-content: center;
+			z-index: 9999;
+		}
+		.loading-overlay.visible {
+			display: flex;
+		}
+				.loading-box {
+			background: #fff;
+			border: 1px solid #ccc;
+			border-radius: 10px;
+			padding: 22px 26px;
+			box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+			text-align: center;
+			min-width: 340px;
+			max-width: 420px;
+		}
+		.progress-word {
+			font-size: 1.1em;
+			font-weight: 700;
+			margin-top: 8px;
+			margin-bottom: 4px;
+			word-break: break-word;
+		}
+		.progress-detail {
+			font-size: 0.92em;
+			color: #555;
+			margin-bottom: 8px;
+		}
+		.progress-percent {
+			font-size: 0.95em;
+			font-weight: 700;
+			margin-top: 8px;
+		}
+		.progress-shell {
+			width: 100%;
+			height: 14px;
+			margin-top: 14px;
+			background: #e6e6e6;
+			border: 1px solid #cfcfcf;
+			border-radius: 999px;
+			overflow: hidden;
+		}
+		.progress-bar {
+			width: 0%;
+			height: 100%;
+			background: #4a78b0;
+			border-radius: 999px;
+			transition: width 0.2s ease;
+		}
+		@media (max-width: 1100px) { .result-controls-grid, .histogram-grid { grid-template-columns: 1fr; } }
+	</style>
+</head>
+<body data-has-results="{% if results %}1{% else %}0{% endif %}">
+	<div id="loading-overlay" class="loading-overlay" style="display: none; position: fixed; inset: 0; background: rgba(255, 255, 255, 0.82); align-items: center; justify-content: center; z-index: 9999;" aria-live="polite" aria-busy="true">
+		<div class="loading-box">
+			<div><strong>Processing…</strong></div>
+			<div class="small-note">Please wait while the analysis runs.</div>
+			<div id="progress-word" class="progress-word">Preparing…</div>
+			<div id="progress-detail" class="progress-detail">Starting analysis</div>
+			<div class="progress-shell">
+				<div id="progress-bar" class="progress-bar"></div>
+			</div>
+			<div id="progress-percent" class="progress-percent">0%</div>
+		</div>
+	</div>
+
+	<h1>Cognate Synonym Evaluation</h1>
+
+	<form method="post" enctype="multipart/form-data" id="search-form" autocomplete="off">
+		<div>
+			<label for="l2_language">L2 language</label><br>
+ 			<select name="l2_language" id="l2_language">
+				{% for lang in l2_languages %}
+					<option value="{{ lang }}" {% if lang == l2_selected %}selected{% endif %}>{{ lang }}</option>
+				{% endfor %}
+			</select>
+		</div>
+
+		<div>
+			<label for="threshold">Initial semantic similarity threshold (0 to 1)</label><br>
+			<input type="number" id="threshold" name="threshold" min="0" max="1" step="0.01" value="{{ threshold }}">
+			<div class="help-text">Visible semantic filter. Can be adjusted after analysis.</div>
+		</div>
+
+		<div>
+			<label for="ortho_threshold">Initial orthographic similarity threshold (0 to 1)</label><br>
+			<input type="number" id="ortho_threshold" name="ortho_threshold" min="0" max="1" step="0.01" value="{{ ortho_threshold }}">
+			<div class="help-text">Visible orthographic filter. Can be adjusted after analysis.</div>
+		</div>
+
+		<div>
+			<label for="frequency_threshold">Initial wordfreq estimated frequency threshold (per million)</label><br>
+			<input type="number" id="frequency_threshold" name="frequency_threshold" min="0" step="0.1" value="{{ frequency_threshold }}">
+			<div class="help-text">Visible wordfreq estimated frequency filter. Can be adjusted after analysis.</div>
+		</div>
+
+		<div>
+			<label for="word_input">Single English target word</label><br>
+			<input type="text" id="word_input" name="word_input" placeholder="e.g., book" value="{{ word_input_value }}">
+		</div>
+
+		<div id="direct-translation-container">
+			<label for="direct_translation">Direct <span id="direct-translation-language">{{ l2_selected }}</span> translation (optional)</label><br>
+			<input
+				type="text"
+				id="direct_translation"
+				name="direct_translation"
+				placeholder="Leave blank to translate automatically (Google Translate)"
+				value="{{ direct_translation_value|default('', true) }}"
+				aria-describedby="direct-translation-help"
+			>
+			<div class="help-text" id="direct-translation-help">Available only for one manually entered word. Batch TXT uploads always use automatic translation.</div>
+		</div>
+
+		<div class="help-text">Or upload a .txt file with one English target word per line. Batch words are translated automatically.</div>
+
+		<div>
+			<label for="file_input">Upload .txt file</label><br>
+			<input type="file" id="file_input" name="file_input" accept=".txt">
+		</div>
+
+		<button type="submit" id="submit-button">Run analysis</button>
+	</form>
+
+	{% if frequency_status and not frequency_status["ready"] %}
+		<div class="warning">{{ frequency_status["message"] }}</div>
+	{% elif frequency_status and frequency_status["ready"] %}
+		<div class="small-note">{{ frequency_status["message"] }}{% if frequency_status["path"] %} Source: {{ frequency_status["path"] }}{% endif %}</div>
+	{% endif %}
+
+	{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+	{% if results %}
+		{% if csv_download_url %}
+			<div class="download-panel">
+				<a class="download-button" href="{{ csv_download_url }}" download>Download CSV results</a>
+				<div class="small-note">The CSV contains one row per cognate synonym candidate, plus target, translation, target frequency, translation frequency, etymology, score, candidate frequency, ancestor, and threshold-pass columns.</div>
+			</div>
+		{% endif %}
+
+		{% for res in results %}
+			{% set result_index = loop.index0 %}
+			<div class="result-header">
+				<h2>Result {{ result_index + 1 }}: {{ res["target_word"] }}</h2>
+				<div class="small-note frequency-summary">
+					Target frequency: {{ "%.2f"|format(res["target_frequency_per_million"]|default(0.0)) }}/mil;
+					Translation frequency: {{ "%.2f"|format(res["translation_frequency_per_million"]|default(0.0)) }}/mil
+				</div>
+			</div>
+
+			{% if res["is_direct_cognate"] %}
+			<div class="direct-cognate-alert">
+				Direct Cognate Detected: "{{ res['target_word'] }}" and "{{ res['translated_word'] }}" share a direct etymological root. No further analysis has been carried out.
+			</div>
+			{% endif %}
+
+			{% if not res["is_direct_cognate"] %}
+			<div class="result-controls-grid">
+				<div class="sliders-panel">
+					<div class="threshold-wrap">
+						<label for="threshold-slider-{{ result_index }}">Visible semantic threshold</label><br>
+						<input type="range" id="threshold-slider-{{ result_index }}" min="0" max="1" step="0.01" value="{{ threshold }}" class="semantic-threshold-slider" data-result-index="{{ result_index }}">
+						<span id="threshold-display-{{ result_index }}">{{ "%.2f"|format(threshold) }}</span>
+					</div>
+
+					<div class="threshold-wrap">
+						<label for="ortho-threshold-slider-{{ result_index }}">Visible orthographic threshold</label><br>
+						<input type="range" id="ortho-threshold-slider-{{ result_index }}" min="0" max="1" step="0.01" value="{{ ortho_threshold }}" class="ortho-threshold-slider" data-result-index="{{ result_index }}">
+						<span id="ortho-threshold-display-{{ result_index }}">{{ "%.2f"|format(ortho_threshold) }}</span>
+					</div>
+
+					<div class="threshold-wrap">
+						<label for="frequency-threshold-slider-{{ result_index }}">Visible wordfreq estimated frequency threshold (per million)</label><br>
+						<input type="range" id="frequency-threshold-slider-{{ result_index }}" min="0" max="{{ res['frequency_slider_max'] }}" step="{{ res['frequency_slider_step'] }}" value="{{ res['initial_frequency_threshold'] if 'initial_frequency_threshold' in res else frequency_threshold }}" class="frequency-threshold-slider" data-result-index="{{ result_index }}">
+						<span id="frequency-threshold-display-{{ result_index }}">{{ "%.2f"|format(res['initial_frequency_threshold'] if 'initial_frequency_threshold' in res else frequency_threshold) }}</span>
+					</div>
+				</div>
+
+				<div class="histogram-grid">
+					<div class="histogram-panel">
+						<h4>Semantic Distribution</h4>
+						<div class="vertical-histogram-wrap">
+							<div class="vertical-histogram histogram-for-result" data-result-index="{{ result_index }}" data-metric="semantic"></div>
+						</div>
+					</div>
+					<div class="histogram-panel">
+						<h4>Orthographic Distribution</h4>
+						<div class="vertical-histogram-wrap">
+						<div class="vertical-histogram histogram-for-result" data-result-index="{{ result_index }}" data-metric="orthographic"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+			{% endif %}
+
+			<table>
+				<colgroup>
+					<col class="col-target">
+					<col class="col-target-ety">
+					<col class="col-translation">
+ 					<col class="col-translation-ety">
+					<col class="col-synonyms">
+				</colgroup>
+				<thead>
+					<tr>
+						<th>Target (EN)</th>
+						<th>Target Etymology</th>
+						<th>Translation ({{ res["translated_language"] }})</th>
+						<th>Translation Etymology</th>
+ 						<th>Cognate Synonyms</th>
+					</tr>
+				</thead>
+				<tbody>
+					<tr>
+							<td>{{ res["target_word"] }}</td>
+						<td class="ety-box small-note">{{ res["target_word_etymology"] }}</td>
+						<td>{{ res["translated_word"] }}</td>
+						<td class="ety-box small-note">{{ res["translated_word_etymology"] }}</td>
+						<td id="synonym-cell-{{ result_index }}">
+							{% if res["is_direct_cognate"] %}
+								<span class="small-note"><strong>Cognate found - not searched</strong></span>
+ 							{% elif res["synonym_groups"] %}
+								{% for group in res["synonym_groups"] %}
+									<div class="synonym-row-group" data-result-index="{{ result_index }}">
+										<strong>{{ group["ancestor"] }}</strong>:
+										{% for item in group["items"] %}
+											<span class="synonym-item" data-result-index="{{ result_index }}" data-similarity="{{ item['similarity'] }}" data-ortho-similarity="{{ item['ortho_similarity'] }}" data-frequency="{{ item['frequency_per_million'] }}">
+												{{ item["word"] }} (sem {{ "%.3f"|format(item["similarity"]) }}, ortho {{ "%.3f"|format(item["ortho_similarity"]) }}, freq {{ "%.2f"|format(item["frequency_per_million"]) }}/mil){% if not loop.last %}; {% endif %}
+											</span>
+										{% endfor %}
+									</div>
+								{% endfor %}
+								<div class="group-none" id="group-none-{{ result_index }}">None above threshold</div>
+							{% else %}
+								<div class="group-none visible" id="group-none-{{ result_index }}">No synonyms found</div>
+							{% endif %}
+						</td>
+					</tr>
+				</tbody>
+			</table>
+
+			<script type="application/json" id="candidate-data-{{ result_index }}">
+				{{ res["all_cogsyn_candidates"] | tojson }}
+			</script>
+		{% endfor %}
+	{% endif %}
+
+	<script>
+		document.addEventListener("DOMContentLoaded", function () {
+			const overlay = document.getElementById("loading-overlay");
+			const progressBar = document.getElementById("progress-bar");
+			const progressPercent = document.getElementById("progress-percent");
+			const progressWord = document.getElementById("progress-word");
+			const progressDetail = document.getElementById("progress-detail");
+			const searchForm = document.getElementById("search-form");
+			const fileInput = document.getElementById("file_input");
+			const wordInput = document.getElementById("word_input");
+			const directTranslationInput = document.getElementById("direct_translation");
+			const l2LanguageSelect = document.getElementById("l2_language");
+			const directTranslationLanguage = document.getElementById("direct-translation-language");
+
+			let progressPollTimer = null;
+			let waitingForFreshProgress = false;
+
+			function hideOverlay() {
+				if (overlay) {
+					overlay.classList.remove("visible");
+					overlay.style.display = "none";
+				}
+			}
+			function showOverlay() {
+				if (overlay) {
+					overlay.style.display = "flex";
+					overlay.classList.add("visible");
+				}
+			}
+			function updateOverlay(progressData) {
+				const pct = Math.max(0, Math.min(100, parseInt(progressData.progress ?? 0, 10) || 0));
+ 				const currentWord = (progressData.current_word || "").trim();
+				const detail = (progressData.detail || "").trim();
+
+				if (progressBar) {
+					progressBar.style.width = pct + "%";
+				}
+				if (progressPercent) {
+					progressPercent.textContent = pct + "%";
+				}
+				if (progressWord) {
+					progressWord.textContent = currentWord || "Preparing…";
+				}
+				if (progressDetail) {
+					progressDetail.textContent = detail || "Working…";
+				}
+			}
+			function resetOverlayDisplay() {
+				updateOverlay({
+					current_word: "",
+					progress: 0,
+					detail: "Starting analysis"
+				});
+			}
+			function updateDirectTranslationLabel() {
+				if (directTranslationLanguage && l2LanguageSelect) {
+					directTranslationLanguage.textContent = l2LanguageSelect.value || "selected-language";
+				}
+			}
+
+			function syncDirectTranslationAvailability() {
+				const hasBatchFile = Boolean(fileInput && fileInput.files && fileInput.files.length > 0);
+				if (directTranslationInput) {
+					directTranslationInput.disabled = hasBatchFile;
+					directTranslationInput.setAttribute("aria-disabled", hasBatchFile ? "true" : "false");
+				}
+				if (wordInput) {
+					wordInput.required = Boolean(
+						directTranslationInput &&
+						!directTranslationInput.disabled &&
+						directTranslationInput.value.trim()
+					);
+				}
+			}
+
+			function clearFileInput() {
+				if (fileInput) {
+					fileInput.value = "";
+				}
+				syncDirectTranslationAvailability();
+				resetOverlayDisplay();
+			}
+			function stopProgressPolling() {
+				if (progressPollTimer) {
+					clearInterval(progressPollTimer);
+					progressPollTimer = null;
+				}
+			}
+			async function pollProgressOnce() {
+				try {
+					const response = await fetch("/progress", {
+						method: "GET",
+						cache: "no-store",
+						headers: { "X-Requested-With": "XMLHttpRequest" }
+					});
+					if (!response.ok) {
+						return;
+					}
+					const progressData = await response.json();
+					if (waitingForFreshProgress) {
+						if (progressData.running !== true) {
+							return;
+						}
+						 waitingForFreshProgress = false;
+					}
+					updateOverlay(progressData);
+					if (progressData.running === false && progressData.progress >= 100) {
+						stopProgressPolling();
+					}
+				} catch (error) {
+				}
+			}
+
+			function startProgressPolling() {
+				stopProgressPolling();
+				pollProgressOnce();
+				progressPollTimer = window.setInterval(pollProgressOnce, 2000);
+			}
+
+			async function getSubmittedWords() {
+				const words = [];
+				 const typedWord = (document.getElementById("word_input")?.value || "").trim();
+ 				const localFileInput = document.getElementById("file_input");
+
+				if (localFileInput && localFileInput.files && localFileInput.files.length > 0) {
+					try {
+ 						const fileText = await localFileInput.files[0].text();
+						fileText.split(/\r?\n/).forEach(line => {
+							const cleaned = line.trim();
+							if (cleaned) {
+								words.push(cleaned);
+							}
+						});
+					} catch (error) {
+					}
+				}
+				if (typedWord) {
+					words.push(typedWord);
+				}
+				const seen = new Set();
+				return words.filter(word => {
+					const key = word.toLowerCase();
+					if (seen.has(key)) {
+						return false;
+					}
+					seen.add(key);
+					return true;
+				});
+			}
+			updateDirectTranslationLabel();
+			syncDirectTranslationAvailability();
+			hideOverlay();
+			clearFileInput();
+			window.addEventListener("pageshow", function () {
+				hideOverlay();
+				clearFileInput();
+			});
+			window.addEventListener("load", function () {
+				hideOverlay();
+				clearFileInput();
+			});
+
+			if (fileInput) {
+				fileInput.addEventListener("click", function () {
+					this.value = "";
+					syncDirectTranslationAvailability();
+					resetOverlayDisplay();
+				});
+				fileInput.addEventListener("change", syncDirectTranslationAvailability);
+			}
+
+			if (directTranslationInput) {
+				directTranslationInput.addEventListener("input", syncDirectTranslationAvailability);
+			}
+
+			if (l2LanguageSelect) {
+				l2LanguageSelect.addEventListener("change", updateDirectTranslationLabel);
+			}
+
+			const SCORE_BIN_LABELS = ["0.0-0.1","0.1-0.2","0.2-0.3","0.3-0.4","0.4-0.5","0.5-0.6","0.6-0.7","0.7-0.8","0.8-0.9","0.9-1.0"];
+			const FREQUENCY_BINS = [
+					{ label: "0-1", min: 0, max: 1 },
+					{ label: "1-2", min: 1, max: 2 },
+					{ label: "2-5", min: 2, max: 5 },
+					{ label: "5-10", min: 5, max: 10 },
+					{ label: "10-20", min: 10, max: 20 },
+					{ label: "20-50", min: 20, max: 50 },
+					{ label: "50-100", min: 50, max: 100 },
+					{ label: "100-200", min: 100, max: 200 },
+					{ label: "200-500", min: 200, max: 500 },
+					{ label: "500-1000", min: 500, max: 1000 },
+					{ label: "1000+", min: 1000, max: Infinity }
+			];
+
+			function getHistogramLabels(metric) {
+				return metric === "frequency" ? FREQUENCY_BINS.map(b => b.label) : SCORE_BIN_LABELS;
+			}
+
+			function scoreBinIndex(value) {
+				const numericValue = Number(value);
+				const clampedValue = Number.isFinite(numericValue)
+					? Math.max(0, Math.min(1, numericValue))
+					: 0;
+				return Math.min(Math.floor(clampedValue * 10), 9);
+			}
+
+			function frequencyBinIndex(value) {
+				for (let i = 0; i < FREQUENCY_BINS.length; i++) {
+					const bin = FREQUENCY_BINS[i];
+					if (value >= bin.min && value < bin.max) {
+						return i;
+					}
+				}
+				return FREQUENCY_BINS.length - 1;
+			}
+
+			function initializeHistogram(container) {
+				const metric = container.dataset.metric;
+				const labels = getHistogramLabels(metric);
+				container.innerHTML = "";
+				labels.forEach((label, idx) => {
+					const bin = document.createElement("div"); bin.className = "vh-bin";
+					const count = document.createElement("div"); count.className = "vh-count histogram-count"; count.dataset.binIndex = idx; count.textContent = "0";
+					const  barWrap = document.createElement("div"); barWrap.className = "vh-bar-wrap";
+					const bar = document.createElement("div"); bar.className = "vh-bar histogram-bar"; bar.dataset.binIndex = idx; bar.style.height = "0%";
+					const binLabel = document.createElement("div"); binLabel.className = "vh-label"; binLabel.textContent = label;
+					barWrap.appendChild(bar); bin.appendChild(count); bin.appendChild(barWrap); bin.appendChild(binLabel);
+					container.appendChild(bin);
+				});
+			}
+
+			function formatFrequency(value) {
+				const num = parseFloat(value);
+				if (!Number.isFinite(num)) return "0.00";
+				return num >= 100 ? num.toFixed(0) : num.toFixed(2);
+			}
+
+			function updateHistogram(resultIndex, metric, semThreshold, orthoThreshold, frequencyThreshold) {
+ 				const candidates = JSON.parse(document.getElementById("candidate-data-" + resultIndex).textContent);
+				const  binCount = metric === "frequency" ? FREQUENCY_BINS.length : SCORE_BIN_LABELS.length;
+				const counts = new Array(binCount).fill(0);
+
+				candidates.forEach(c => {
+					let include = false;
+					let value = 0;
+					if (metric === "semantic") {
+						include = c.ortho_similarity >= orthoThreshold && c.frequency_per_million >= frequencyThreshold;
+						value = c.similarity;
+					} else if (metric === "orthographic") {
+						include = c.similarity >= semThreshold && c.frequency_per_million >= frequencyThreshold;
+						value = c.ortho_similarity;
+					} else {
+						 include = c.similarity >= semThreshold && c.ortho_similarity >= orthoThreshold;
+ 						value = c.frequency_per_million;
+					}
+
+					if (!include) return;
+					const idx = metric === "frequency" ? frequencyBinIndex(value) : scoreBinIndex(value);
+					counts[idx]++;
+				});
+
+				const maxCount = Math.max(...counts, 0);
+				const histogram = document.querySelector(`.histogram-for-result[data-result-index="${resultIndex}"][data-metric="${metric}"]`);
+				histogram.querySelectorAll(".histogram-count").forEach(el => el.textContent = counts[el.dataset.binIndex]);
+				histogram.querySelectorAll(".histogram-bar").forEach(el => el.style.height = (maxCount === 0 ? 0 : (counts[el.dataset.binIndex] / maxCount * 100)) + "%");
+			}
+
+			function applyFilters(idx) {
+				const semT = parseFloat(document.getElementById("threshold-slider-" + idx).value);
+				const orthoT = parseFloat(document.getElementById("ortho-threshold-slider-" + idx).value);
+				const freqT = parseFloat(document.getElementById("frequency-threshold-slider-" + idx).value);
+				let anyVisible = false;
+
+				document.querySelectorAll(`.synonym-row-group[data-result-index="${idx}"]`).forEach(group => {
+					let groupVisible = false;
+					group.querySelectorAll(".synonym-item").forEach(item => {
+						const visible =
+							parseFloat(item.dataset.similarity) >= semT &&
+							parseFloat(item.dataset.orthoSimilarity) >= orthoT &&
+							parseFloat(item.dataset.frequency) >= freqT;
+						item.classList.toggle("hidden-item", !visible);
+						if (visible) groupVisible = true;
+					});
+					group.classList.toggle("hidden-group", !groupVisible);
+					if (groupVisible) anyVisible = true;
+				});
+
+				const noneEl = document.getElementById("group-none-" + idx);
+				if (noneEl) {
+					noneEl.classList.toggle("visible", !anyVisible);
+				}
+				updateHistogram(idx, "semantic", semT, orthoT, freqT);
+				updateHistogram(idx, "orthographic", semT, orthoT, freqT);
+			}
+
+			document.querySelectorAll(".histogram-for-result").forEach(initializeHistogram);
+
+			const sliderClasses = [
+				"semantic-threshold-slider",
+				"ortho-threshold-slider",
+				"frequency-threshold-slider"
+			];
+
+			sliderClasses.forEach(className => {
+				document.querySelectorAll("." + className).forEach(slider => {
+					slider.addEventListener("input", function() {
+						const idx = this.dataset.resultIndex;
+						if (className === "semantic-threshold-slider") {
+							document.getElementById("threshold-display-" + idx).textContent = parseFloat(this.value).toFixed(2);
+						} else if (className === "ortho-threshold-slider") {
+							document.getElementById("ortho-threshold-display-" + idx).textContent = parseFloat(this.value).toFixed(2);
+						} else {
+							document.getElementById("frequency-threshold-display-" + idx).textContent = formatFrequency(this.value);
+						}
+						applyFilters(idx);
+					});
+				});
+			});
+
+			const resultIndices = new Set();
+			document.querySelectorAll(".semantic-threshold-slider").forEach(slider => resultIndices.add(slider.dataset.resultIndex));
+			resultIndices.forEach(idx => applyFilters(idx));
+
+			if (searchForm) {
+				searchForm.addEventListener("submit", async function(event) {
+					event.preventDefault();
+					syncDirectTranslationAvailability();
+					if (!searchForm.reportValidity()) {
+						return;
+					}
+					const submittedWords = await getSubmittedWords();
+					waitingForFreshProgress = true;
+					updateOverlay({
+						current_word: submittedWords[0] || "",
+						progress: 0,
+						detail: submittedWords.length > 1
+							? `Preparing 1 of ${submittedWords.length}`
+							: "Preparing analysis"
+					});
+					showOverlay();
+					try {
+							const requestPromise = fetch(searchForm.action || window.location.pathname, {
+								method: "POST",
+								body: new FormData(searchForm),
+								headers: { "X-Requested-With": "XMLHttpRequest" }
+							});
+							startProgressPolling();
+							const response = await requestPromise;
+							const html = await response.text();
+							stopProgressPolling();
+							document.open();
+							document.write(html);
+							document.close();
+					} catch (error) {
+						stopProgressPolling();
+						waitingForFreshProgress = false;
+						hideOverlay();
+						alert("The analysis request failed. Please try again.");
+					}
+				});
+			}
+		});
+	</script>
+
+</body>
+</html>
