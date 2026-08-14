@@ -1577,9 +1577,8 @@ def build_progress_callback(word_index: int, total_words: int, current_word: str
 			error=None,
 		)
 	return callback
-# ----------------------------
-# Streamlit application layer
-# ----------------------------
+
+###streamlit changes
 
 @st.cache_resource(show_spinner=False)
 def load_index_bundle(data_file: str, data_mtime_ns: int):
