@@ -1983,13 +1983,6 @@ def main():
     if not data_path.exists():
         st.markdown(f'<div class="error-box">Could not find the etymology data file: {_escape(data_path)}. Place etymology_data_unique_cleaned.jsonl beside app.py or set ETYMOLOGY_DATA_FILE.</div>', unsafe_allow_html=True)
         st.stop()
-    try:
-        with st.spinner("Loading etymology data…"):
-            bundle = load_index_bundle(str(data_path), data_path.stat().st_mtime_ns)
-            attach_index_bundle(bundle)
-    except Exception as exc:
-        st.exception(exc)
-        st.stop()
     default_frequency = DEFAULT_FREQUENCY_THRESHOLD if FREQUENCY_STATUS["ready"] else 0.0
     with st.container(key="search_form"):
         l2_selected = st.selectbox("L2 language", L2_LANGUAGES, index=0, key="l2_language")
@@ -2036,6 +2029,13 @@ def main():
             st.markdown(f'<div class="error-box">{_escape(error)}</div>', unsafe_allow_html=True)
         else:
             try:
+                with st.spinner("Loading etymology data…"):
+                    bundle = load_index_bundle(
+                        str(data_path),
+                        data_path.stat().st_mtime_ns,
+                    )
+                    attach_index_bundle(bundle)
+
                 results = run_analysis(rows, l2_selected, float(frequency_threshold))
                 st.session_state["analysis_results"] = results
                 st.session_state["analysis_run_id"] = int(st.session_state.get("analysis_run_id", 0)) + 1
