@@ -1,5 +1,6 @@
 #import modules
-import csv, glob, html as html_lib, json, math, os, re, time, unicodedata
+import csv, gc, glob, html as html_lib, json, math, os, re, time, unicodedata
+import urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 from threading import Lock
 from difflib import SequenceMatcher
@@ -1139,16 +1140,144 @@ def find_best_key(word: str, lang: str):
 			best_key = key
 	return best_key or exact_key
 
-def safe_translate(word: str, source_lang: str, target_lang: str):
+def _google_translate_api_key():
+	"""Return the Google Cloud Translation API key from Streamlit Secrets or the environment."""
+	try:
+		key = st.secrets.get("GOOGLE_TRANSLATE_API_KEY", "")
+	except Exception:
+		key = ""
+	return (key or os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")).strip()
+
+
+def _google_cloud_translate_batch(words, source_code: str, target_code: str, api_key: str):
+	"""Translate up to many short strings with Google Cloud Translation Basic (v2).
+
+	Google's v2 translate endpoint accepts up to 128 q strings per request, so batch
+	uploads can be translated in a handful of authenticated requests instead of one
+	unauthenticated web-scraping request per word.
+	"""
+	if not words:
+		return []
+
+	endpoint = (
+		"https://translation.googleapis.com/language/translate/v2?"
+		+ urllib.parse.urlencode({"key": api_key})
+	)
+	translated_all = []
+
+	for start in range(0, len(words), 128):
+		chunk = words[start:start + 128]
+		body = json.dumps({
+			"q": chunk,
+			"source": source_code,
+			"target": target_code,
+			"format": "text",
+		}).encode("utf-8")
+
+		last_error = None
+		for attempt in range(4):
+			req = urllib.request.Request(
+				endpoint,
+				data=body,
+				headers={"Content-Type": "application/json; charset=utf-8"},
+				method="POST",
+			)
+			try:
+				with urllib.request.urlopen(req, timeout=30) as response:
+					payload = json.loads(response.read().decode("utf-8"))
+				translations = payload.get("data", {}).get("translations", [])
+				if len(translations) != len(chunk):
+					raise RuntimeError(
+						f"Google Cloud Translation returned {len(translations)} results for {len(chunk)} inputs."
+					)
+				translated_all.extend(
+					html_lib.unescape(item.get("translatedText", "")).strip()
+					for item in translations
+				)
+				last_error = None
+				break
+			except urllib.error.HTTPError as exc:
+				try:
+					detail = exc.read().decode("utf-8", errors="replace")
+				except Exception:
+					detail = str(exc)
+				last_error = RuntimeError(
+					f"Google Cloud Translation HTTP {exc.code}: {detail[:500]}"
+				)
+				if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+					break
+				time.sleep(1.5 * (2 ** attempt))
+			except urllib.error.URLError as exc:
+				last_error = RuntimeError(f"Google Cloud Translation network error: {exc}")
+				if attempt == 3:
+					break
+				time.sleep(1.5 * (2 ** attempt))
+			except Exception as exc:
+				last_error = RuntimeError(f"Google Cloud Translation error: {exc}")
+				break
+
+		if last_error is not None:
+			raise last_error
+
+	if any(not value for value in translated_all):
+		raise RuntimeError("Google Cloud Translation returned an empty translation.")
+	return translated_all
+
+
+def translate_many(words, source_lang: str, target_lang: str):
+	"""Translate a list of strings, preferring the official Google Cloud API.
+
+	If no Cloud API key is configured, retain deep-translator as a compatibility
+	fallback. Unlike the old implementation, failures are raised instead of silently
+	returning the original English text.
+	"""
+	clean_words = [(word or "").strip() for word in words]
+	if not clean_words:
+		return []
+	if any(not word for word in clean_words):
+		raise ValueError("Cannot translate an empty word.")
+
 	source_code = TRANSLATOR_MAP[source_lang]
 	target_code = TRANSLATOR_MAP[target_lang]
+	api_key = _google_translate_api_key()
+	if api_key:
+		return _google_cloud_translate_batch(clean_words, source_code, target_code, api_key)
+
 	if GoogleTranslator is None:
-		return word
-	try:
-		translated = GoogleTranslator(source=source_code, target=target_code).translate(word)
-	except Exception:
-		translated = word
-	return translated or word
+		raise RuntimeError(
+			"Automatic translation is unavailable. Configure GOOGLE_TRANSLATE_API_KEY "
+			"in Streamlit Secrets."
+		)
+
+	translated_all = []
+	for word in clean_words:
+		last_error = None
+		for attempt in range(3):
+			try:
+				translated = GoogleTranslator(
+					source=source_code, target=target_code
+				).translate(word)
+				translated = (translated or "").strip()
+				if not translated:
+					raise RuntimeError("translator returned an empty result")
+				translated_all.append(translated)
+				last_error = None
+				break
+			except Exception as exc:
+				last_error = exc
+				if attempt < 2:
+					time.sleep(1.0 * (2 ** attempt))
+		if last_error is not None:
+			raise RuntimeError(
+				f"Automatic translation failed for '{word}': {last_error}. "
+				"For reliable deployed translation, configure GOOGLE_TRANSLATE_API_KEY "
+				"in Streamlit Secrets."
+			) from last_error
+	return translated_all
+
+
+def safe_translate(word: str, source_lang: str, target_lang: str):
+	return translate_many([word], source_lang, target_lang)[0]
 
 def glosses_conflict(seed_gloss: set, cand_gloss: set) -> bool:
 	if not seed_gloss or not cand_gloss:
@@ -1577,8 +1706,9 @@ def build_progress_callback(word_index: int, total_words: int, current_word: str
 			error=None,
 		)
 	return callback
-
-###streamlit changes
+# ----------------------------
+# Streamlit application layer
+# ----------------------------
 
 @st.cache_resource(show_spinner=False)
 def load_index_bundle(data_file: str, data_mtime_ns: int):
@@ -1933,16 +2063,48 @@ def run_analysis(rows, l2_selected, frequency_threshold):
     results = []
     total_words = len(rows)
     progress_placeholder = st.empty()
-    progress_placeholder.markdown(progress_box_html("Preparing…", "Starting analysis", 0), unsafe_allow_html=True)
-    for idx, (word, supplied_translation) in enumerate(rows, start=1):
+    progress_placeholder.markdown(
+        progress_box_html("Preparing…", "Translating words", 0),
+        unsafe_allow_html=True,
+    )
+
+    auto_positions = [idx for idx, (_, supplied) in enumerate(rows) if not supplied]
+    if auto_positions:
+        auto_words = [rows[idx][0] for idx in auto_positions]
+        auto_translations = translate_many(auto_words, "English", l2_selected)
+        translated_by_position = dict(zip(auto_positions, auto_translations))
+    else:
+        translated_by_position = {}
+
+    prepared_rows = []
+    for idx, (word, supplied_translation) in enumerate(rows):
+        translated = supplied_translation or translated_by_position[idx]
+        prepared_rows.append((word, translated))
+
+    for idx, (word, translated_word) in enumerate(prepared_rows, start=1):
         def callback(stage_fraction, detail, *, _idx=idx, _word=word):
             clamped = max(0.0, min(1.0, float(stage_fraction)))
             overall = ((_idx - 1) + clamped) / total_words
-            progress_placeholder.markdown(progress_box_html(_word, detail, int(round(overall * 100))), unsafe_allow_html=True)
-        result = analyze_word(word, l2_selected, progress_callback=callback, direct_translation=supplied_translation or None)
-        result["initial_frequency_threshold"] = min(frequency_threshold, result.get("frequency_slider_max", 1.0))
+            progress_placeholder.markdown(
+                progress_box_html(_word, detail, int(round(overall * 100))),
+                unsafe_allow_html=True,
+            )
+
+        result = analyze_word(
+            word,
+            l2_selected,
+            progress_callback=callback,
+            direct_translation=translated_word,
+        )
+        result["initial_frequency_threshold"] = min(
+            frequency_threshold, result.get("frequency_slider_max", 1.0)
+        )
         results.append(result)
-    progress_placeholder.markdown(progress_box_html(rows[-1][0], "Analysis complete", 100), unsafe_allow_html=True)
+
+    progress_placeholder.markdown(
+        progress_box_html(rows[-1][0], "Analysis complete", 100),
+        unsafe_allow_html=True,
+    )
     time.sleep(0.15)
     progress_placeholder.empty()
     return results
@@ -1978,33 +2140,102 @@ def main():
     st.set_page_config(page_title="Cognate Synonym Evaluation", layout="wide")
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown("<h1>Cognate Synonym Evaluation</h1>", unsafe_allow_html=True)
+
     data_path = Path(DEFAULT_DATA_FILE)
     if not data_path.exists():
-        st.markdown(f'<div class="error-box">Could not find the etymology data file: {_escape(data_path)}. Place etymology_data_unique_cleaned.jsonl beside app.py or set ETYMOLOGY_DATA_FILE.</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="error-box">Could not find the etymology data file: '
+            f'{_escape(data_path)}. Place etymology_data_unique_cleaned.jsonl '
+            f'beside app.py or set ETYMOLOGY_DATA_FILE.</div>',
+            unsafe_allow_html=True,
+        )
         st.stop()
+
     default_frequency = DEFAULT_FREQUENCY_THRESHOLD if FREQUENCY_STATUS["ready"] else 0.0
+
     with st.container(key="search_form"):
         l2_selected = st.selectbox("L2 language", L2_LANGUAGES, index=0, key="l2_language")
-        semantic_threshold = st.number_input("Initial semantic similarity threshold (0 to 1)", 0.0, 1.0, float(DEFAULT_SEMANTIC_THRESHOLD), 0.01, key="initial_semantic")
-        st.markdown('<div class="help-text">Visible semantic filter. Can be adjusted after analysis.</div>', unsafe_allow_html=True)
-        ortho_threshold = st.number_input("Initial orthographic similarity threshold (0 to 1)", 0.0, 1.0, float(DEFAULT_ORTHO_SIMILARITY_THRESHOLD), 0.01, key="initial_ortho")
-        st.markdown('<div class="help-text">Visible orthographic filter. Can be adjusted after analysis.</div>', unsafe_allow_html=True)
-        frequency_threshold = st.number_input("Initial wordfreq estimated frequency threshold (per million)", min_value=0.0, value=float(default_frequency), step=0.1, key="initial_frequency")
-        st.markdown('<div class="help-text">Visible wordfreq estimated frequency filter. Can be adjusted after analysis.</div>', unsafe_allow_html=True)
-        word_input = st.text_input("Single English target word", placeholder="e.g., book", key="word_input")
+        semantic_threshold = st.number_input(
+            "Initial semantic similarity threshold (0 to 1)",
+            0.0, 1.0, float(DEFAULT_SEMANTIC_THRESHOLD), 0.01,
+            key="initial_semantic",
+        )
+        st.markdown(
+            '<div class="help-text">Visible semantic filter. Can be adjusted after analysis.</div>',
+            unsafe_allow_html=True,
+        )
+        ortho_threshold = st.number_input(
+            "Initial orthographic similarity threshold (0 to 1)",
+            0.0, 1.0, float(DEFAULT_ORTHO_SIMILARITY_THRESHOLD), 0.01,
+            key="initial_ortho",
+        )
+        st.markdown(
+            '<div class="help-text">Visible orthographic filter. Can be adjusted after analysis.</div>',
+            unsafe_allow_html=True,
+        )
+        frequency_threshold = st.number_input(
+            "Initial wordfreq estimated frequency threshold (per million)",
+            min_value=0.0,
+            value=float(default_frequency),
+            step=0.1,
+            key="initial_frequency",
+        )
+        st.markdown(
+            '<div class="help-text">Visible wordfreq estimated frequency filter. Can be adjusted after analysis.</div>',
+            unsafe_allow_html=True,
+        )
+        word_input = st.text_input(
+            "Single English target word",
+            placeholder="e.g., book",
+            key="word_input",
+        )
         batch_selected = st.session_state.get("file_input") is not None
-        direct_translation = st.text_input(f"Direct {l2_selected} translation (optional)", placeholder="Leave blank to translate automatically (Google Translate)", disabled=batch_selected, key="direct_translation")
+        direct_translation = st.text_input(
+            f"Direct {l2_selected} translation (optional)",
+            placeholder="Leave blank to translate automatically (Google Translate)",
+            disabled=batch_selected,
+            key="direct_translation",
+        )
         if batch_selected:
             direct_translation = ""
-        st.markdown('<div class="help-text">Available only for one manually entered word. Batch TXT uploads always use automatic translation.</div>', unsafe_allow_html=True)
-        st.markdown('<div class="help-text" style="margin-top:4px">Or upload a .txt file with one English target word per line. Batch words are translated automatically.</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="help-text">Available only for one manually entered word. '
+            'Batch TXT uploads always use automatic translation.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="help-text" style="margin-top:4px">Or upload a .txt file with one English '
+            'target word per line. Batch words are translated automatically.</div>',
+            unsafe_allow_html=True,
+        )
         uploaded = st.file_uploader("Upload .txt file", type=["txt"], key="file_input")
         run_clicked = st.button("Run analysis", key="run_analysis")
+
     if FREQUENCY_STATUS["ready"]:
         source = f' Source: {FREQUENCY_STATUS["path"]}' if FREQUENCY_STATUS.get("path") else ""
-        st.markdown(f'<div class="small-note">{_escape(FREQUENCY_STATUS["message"])}{_escape(source)}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="small-note">{_escape(FREQUENCY_STATUS["message"])}{_escape(source)}</div>',
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown(f'<div class="warning">{_escape(FREQUENCY_STATUS["message"])}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="warning">{_escape(FREQUENCY_STATUS["message"])}</div>',
+            unsafe_allow_html=True,
+        )
+
+    if _google_translate_api_key():
+        st.markdown(
+            '<div class="small-note">Automatic translation: Google Cloud Translation.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="warning"><strong>Translation setup:</strong> GOOGLE_TRANSLATE_API_KEY is not '
+            'configured in Streamlit Secrets. The app will use the legacy deep-translator fallback, '
+            'which can be rate-limited or blocked on hosted servers.</div>',
+            unsafe_allow_html=True,
+        )
+
     if run_clicked:
         error = None
         rows = []
@@ -2013,10 +2244,12 @@ def main():
         except ValueError as exc:
             batch_words = []
             error = str(exc)
+
         if direct_translation and uploaded is not None:
             error = "A direct translation can only be used for one manually entered word."
         elif direct_translation and not word_input.strip():
             error = "Enter the English word that matches the direct translation."
+
         if not error:
             rows.extend((word, "") for word in batch_words)
             if word_input.strip():
@@ -2024,9 +2257,25 @@ def main():
             rows = dedupe_rows(rows)
             if not rows:
                 error = "Please provide a word or upload a .txt file with one word per line."
+
         if error:
-            st.markdown(f'<div class="error-box">{_escape(error)}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="error-box">{_escape(error)}</div>',
+                unsafe_allow_html=True,
+            )
         else:
+            st.session_state["_pending_analysis"] = {
+                "rows": rows,
+                "l2_selected": l2_selected,
+                "frequency_threshold": float(frequency_threshold),
+                "semantic_threshold": float(semantic_threshold),
+                "ortho_threshold": float(ortho_threshold),
+            }
+            st.session_state.pop("analysis_results", None)
+
+    pending = st.session_state.get("_pending_analysis")
+    if pending:
+        if not st.session_state.get("_index_warmed", False):
             try:
                 with st.spinner("Loading etymology data…"):
                     bundle = load_index_bundle(
@@ -2034,34 +2283,94 @@ def main():
                         data_path.stat().st_mtime_ns,
                     )
                     attach_index_bundle(bundle)
-
-                results = run_analysis(rows, l2_selected, float(frequency_threshold))
-                st.session_state["analysis_results"] = results
-                st.session_state["analysis_run_id"] = int(st.session_state.get("analysis_run_id", 0)) + 1
-                st.session_state["analysis_initial_sem"] = float(semantic_threshold)
-                st.session_state["analysis_initial_ortho"] = float(ortho_threshold)
-                st.session_state["analysis_initial_freq"] = float(frequency_threshold)
+                st.session_state["_index_warmed"] = True
+                gc.collect()
+                st.rerun()
             except Exception as exc:
-                st.markdown(f'<div class="error-box">Processing error: {_escape(exc)}</div>', unsafe_allow_html=True)
+                st.session_state.pop("_pending_analysis", None)
+                st.markdown(
+                    f'<div class="error-box">Could not load etymology data: {_escape(exc)}</div>',
+                    unsafe_allow_html=True,
+                )
                 with st.expander("Technical details"):
                     st.exception(exc)
+
+        else:
+            try:
+                bundle = load_index_bundle(
+                    str(data_path),
+                    data_path.stat().st_mtime_ns,
+                )
+                attach_index_bundle(bundle)
+
+                results = run_analysis(
+                    pending["rows"],
+                    pending["l2_selected"],
+                    pending["frequency_threshold"],
+                )
+                st.session_state["analysis_results"] = results
+                st.session_state["analysis_run_id"] = int(
+                    st.session_state.get("analysis_run_id", 0)
+                ) + 1
+                st.session_state["analysis_initial_sem"] = pending["semantic_threshold"]
+                st.session_state["analysis_initial_ortho"] = pending["ortho_threshold"]
+                st.session_state["analysis_initial_freq"] = pending["frequency_threshold"]
+                st.session_state.pop("_pending_analysis", None)
+            except Exception as exc:
+                st.session_state.pop("_pending_analysis", None)
+                st.markdown(
+                    f'<div class="error-box">Processing error: {_escape(exc)}</div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Technical details"):
+                    st.exception(exc)
+
     results = st.session_state.get("analysis_results")
     if not results:
         return
+
     run_id = st.session_state.get("analysis_run_id", 0)
     initial_sem = st.session_state.get("analysis_initial_sem", DEFAULT_SEMANTIC_THRESHOLD)
-    initial_ortho = st.session_state.get("analysis_initial_ortho", DEFAULT_ORTHO_SIMILARITY_THRESHOLD)
-    initial_freq = st.session_state.get("analysis_initial_freq", DEFAULT_FREQUENCY_THRESHOLD if FREQUENCY_STATUS["ready"] else 0.0)
+    initial_ortho = st.session_state.get(
+        "analysis_initial_ortho", DEFAULT_ORTHO_SIMILARITY_THRESHOLD
+    )
+    initial_freq = st.session_state.get(
+        "analysis_initial_freq",
+        DEFAULT_FREQUENCY_THRESHOLD if FREQUENCY_STATUS["ready"] else 0.0,
+    )
+
     download_slot = st.empty()
     thresholds_by_result = {}
     for idx, result in enumerate(results):
-        result_initial_freq = min(float(result.get("initial_frequency_threshold", initial_freq)), max(float(result.get("frequency_slider_max", 1.0)), 0.1))
-        thresholds_by_result[idx] = render_result(result, idx, run_id, float(initial_sem), float(initial_ortho), result_initial_freq)
+        result_initial_freq = min(
+            float(result.get("initial_frequency_threshold", initial_freq)),
+            max(float(result.get("frequency_slider_max", 1.0)), 0.1),
+        )
+        thresholds_by_result[idx] = render_result(
+            result,
+            idx,
+            run_id,
+            float(initial_sem),
+            float(initial_ortho),
+            result_initial_freq,
+        )
+
     csv_bytes = build_csv_bytes(results, thresholds_by_result)
     with download_slot.container():
         with st.container(border=True, key="download_panel"):
-            st.download_button("Download CSV results", data=csv_bytes, file_name="cognate_synonym_results.csv", mime="text/csv", key="csv_download")
-            st.markdown('<div class="small-note">The CSV contains one row per cognate synonym candidate, plus target, translation, target frequency, translation frequency, etymology, score, candidate frequency, ancestor, and threshold-pass columns.</div>', unsafe_allow_html=True)
+            st.download_button(
+                "Download CSV results",
+                data=csv_bytes,
+                file_name="cognate_synonym_results.csv",
+                mime="text/csv",
+                key="csv_download",
+            )
+            st.markdown(
+                '<div class="small-note">The CSV contains one row per cognate synonym candidate, '
+                'plus target, translation, target frequency, translation frequency, etymology, '
+                'score, candidate frequency, ancestor, and threshold-pass columns.</div>',
+                unsafe_allow_html=True,
+            )
 
 
 if __name__ == "__main__":
